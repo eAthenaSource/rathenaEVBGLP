@@ -1,0 +1,654 @@
+Index: conf/battle/feature.conf
+===================================================================
+--- conf/battle/feature.conf	(revision 17419)
++++ conf/battle/feature.conf	(working copy)
+@@ -17,4 +17,16 @@
+ 
+ // Atcommand suggestions (Note 1)
+ // If one type incomplete atcommand, it will suggest the complete ones.
+-feature.atcommand_suggestions: off
+\ No newline at end of file
++feature.atcommand_suggestions: off
++
++// Extended Vending System [Lilith]
++// Enable or disable extended vending system? (Note 1)
++extended_vending: yes
++// Show currency's name in vending board? (Note 1)
++show_item_vending: yes
++// Show more info about buying? (Note 1)
++ex_vending_info: yes
++// Item ID for Zeny. Set to 0 if you don't want use Zeny.
++item_zeny: 30000
++// Item ID for Cash. Set to 0 if you don't want use Cash.
++item_cash: 30001
+\ No newline at end of file
+Index: conf/msg_conf/map_msg.conf
+===================================================================
+--- conf/msg_conf/map_msg.conf	(revision 17419)
++++ conf/msg_conf/map_msg.conf	(working copy)
+@@ -1524,5 +1524,16 @@
+ 1478: Party share level range has been changed successfully.
+ 1479: Failed to update configuration. Character server is offline.
+ 
++// Extended Vending system [Lilith]
++700: You do not have enough CashPoint
++701: You do not have enough items
++702: Seller has not enough space in your inventory
++703: Seller can not take all the item
++704: You have selected: %s
++705: You've opened %s's shop. Sale is carried out: %s
++706: Current Currency: %s
++707: %s has bought '%s' in the amount of %d. Revenue: %d %s
++708: Full revenue from %s is %d %s
++
+ //Custom translations
+ //import: conf/msg_conf/import/map_msg_eng_conf.txt
+Index: db/item_db2.txt
+===================================================================
+--- db/item_db2.txt	(revision 17419)
++++ db/item_db2.txt	(working copy)
+@@ -61,3 +61,7 @@
+ //==================================================================
+ //2338,Wedding_Dress,Wedding Dress,5,43000,,500,,0,,0,0xFFFFFFFE,7,0,16,,0,1,0,{},{ setoption Option_Wedding,1; },{ setoption Option_Wedding,0; }
+ //7170,Tuxedo,Tuxedo,5,43000,,10,,0,,0,0xFFFFFFFE,7,1,16,,0,1,0,{},{ setoption Option_Wedding,1; },{ setoption Option_Wedding,0; }
++
++// Vending system
++30000,Zeny,Zeny,3,,10,10,,,,,,,,,,,,,{},{},{}
++30001,Cash,Cash,3,,10,10,,,,,,,,,,,,,{},{},{}
+\ No newline at end of file
+Index: db/item_vending.txt
+===================================================================
+--- db/item_vending.txt	(revision 0)
++++ db/item_vending.txt	(working copy)
+@@ -0,0 +1,12 @@
++// Specific items for Vending System
++// Format: ItemID
++// Max items is equal MAX_INVENTORY ( 100 by default )
++
++// TCG Card
++7227
++// Mithril Coin
++674
++// Silver Coin
++675
++// Bronze Coin
++673
+\ No newline at end of file
+Index: src/map/battle.c
+===================================================================
+--- src/map/battle.c	(revision 17419)
++++ src/map/battle.c	(working copy)
+@@ -6872,6 +6872,14 @@
+ 	{ "item_enabled_npc",                   &battle_config.item_enabled_npc,                1,      0,      1,              },
+ 	{ "item_flooritem_check",               &battle_config.item_onfloor,                    1,      0,      1,              },
+ 	{ "bowling_bash_area",                  &battle_config.bowling_bash_area,               0,      0,      20,             },
++	/**
++	 * Extended Vending system [Lilith]
++	 **/
++	{ "extended_vending",					&battle_config.extended_vending,				1,		0,		1,				},
++	{ "show_item_vending",					&battle_config.show_item_vending,				1,		0,		1,				},
++	{ "ex_vending_info",					&battle_config.ex_vending_info,					1,		0,		1,				},
++	{ "item_zeny",							&battle_config.item_zeny,						0,		0,		MAX_ITEMDB,		},
++	{ "item_cash",							&battle_config.item_cash,						0,		0,		MAX_ITEMDB,		},
+ };
+ #ifndef STATS_OPT_OUT
+ /**
+Index: src/map/battle.h
+===================================================================
+--- src/map/battle.h	(revision 17419)
++++ src/map/battle.h	(working copy)
+@@ -482,6 +482,14 @@
+ 
+ 	int mvp_tomb_enabled;
+ 
++	/**
++	 * Extended Vending system [Lilith]
++	 **/
++	int extended_vending;
++	int show_item_vending;
++	int ex_vending_info;
++	int item_zeny;
++	int item_cash;
+ 	int atcommand_suggestions_enabled;
+ 	int min_npc_vendchat_distance;
+ 	int atcommand_mobinfo_type;
+Index: src/map/clif.c
+===================================================================
+--- src/map/clif.c	(revision 17419)
++++ src/map/clif.c	(working copy)
+@@ -5492,6 +5492,25 @@
+ 	}
+ }
+ 
++void clif_displaymessagecolor(struct map_session_data *sd, const char* msg, unsigned long color)
++{
++	int fd;
++	unsigned short len = strlen(msg) + 1;
++	
++	nullpo_retv(sd);
++	
++	color = (color & 0x0000FF) << 16 | (color & 0x00FF00) | (color & 0xFF0000) >> 16; // RGB to BGR
++	
++	fd = sd->fd;
++	WFIFOHEAD(fd, len+12);
++	WFIFOW(fd,0) = 0x2C1;
++	WFIFOW(fd,2) = len+12;
++	WFIFOL(fd,4) = 0;
++	WFIFOL(fd,8) = color;
++	memcpy(WFIFOP(fd,12), msg, len);
++	WFIFOSET(fd, WFIFOW(fd,2));
++}
++
+ /// Send broadcast message in yellow or blue without font formatting (ZC_BROADCAST).
+ /// 009a <packet len>.W <message>.?B
+ void clif_broadcast(struct block_list* bl, const char* mes, int len, int type, enum send_target target)
+@@ -11325,6 +11344,9 @@
+ 		case GC_POISONINGWEAPON:
+ 			skill_poisoningweapon(sd,nameid);
+ 			break;
++		case MC_VENDING: // Extended Vending system [Lilith]
++			skill_vending(sd,RFIFOW(fd,2));
++			break;
+ 		case NC_MAGICDECOY:
+ 			skill_magicdecoy(sd,nameid);
+ 			break;
+@@ -12002,6 +12024,7 @@
+ ///     0 = canceled
+ ///     1 = open
+ void clif_parse_OpenVending(int fd, struct map_session_data* sd){
++	struct item_data *item = itemdb_exists(sd->vend_loot);
+ 	int cmd = RFIFOW(fd,0);
+ 	struct s_packet_db* info = &packet_db[sd->packet_ver][cmd];
+ 	short len = (short)RFIFOW(fd,info->pos[0]);
+@@ -12008,7 +12031,12 @@
+ 	const char* message = (char*)RFIFOP(fd,info->pos[1]);
+ 	bool flag;
+ 	const uint8* data = (uint8*)RFIFOP(fd,info->pos[3]);
+-
++	char out_msg[1024];
++	
++	if(battle_config.extended_vending && battle_config.show_item_vending && sd->vend_loot){
++		memset(out_msg, '\0', sizeof(out_msg));
++		strcat(strcat(strcat(strcat(out_msg,"["),item->jname),"] "),message);
++	}
+ 	if(cmd == 0x12f){ // (CZ_REQ_OPENSTORE)
+ 		len -= 84;
+ 	}
+@@ -12032,8 +12060,10 @@
+ 
+ 	if( message[0] == '\0' ) // invalid input
+ 		return;
+-
+-	vending_openvending(sd, message, data, len/8);
++	if(battle_config.extended_vending && battle_config.show_item_vending && sd->vend_loot)
++		vending_openvending(sd, out_msg, data, len/8);
++	else
++		vending_openvending(sd, message, data, len/8);
+ }
+ 
+ 
+@@ -16060,6 +16090,49 @@
+ 
+ 	ShowDump(RFIFOP(fd,0), packet_len);
+ }
++
++/**
++ * Extended Vending system [Lilith] 
++ **/
++int clif_vend(struct map_session_data *sd, int skill_lv) {
++
++	struct item_data *item;
++	int c, i, d = 0;
++	int fd;
++
++	nullpo_ret(sd);
++	
++	fd = sd->fd;
++	WFIFOHEAD(fd, 8 * 8 + 8);
++	WFIFOW(fd,0) = 0x1ad;
++	if(battle_config.item_zeny){
++		WFIFOW(fd, d * 2 + 4) = ITEMID_ZENY;
++		d++;
++	}
++	if(battle_config.item_cash){
++		WFIFOW(fd, d * 2 + 4) = ITEMID_CASH;
++		d++;
++	}
++	for( c = d, i = 0; i < ARRAYLENGTH(item_vend); i ++ ) {
++		if((item = itemdb_exists(item_vend[i].itemid)) != NULL && 
++			item->nameid != ITEMID_ZENY && item->nameid != ITEMID_CASH){
++			WFIFOW(fd, c * 2 + 4) = item->nameid;
++			c++;
++		}
++	}
++	if( c > 0 ) {
++		sd->menuskill_id = MC_VENDING;
++		sd->menuskill_val = skill_lv;
++		WFIFOW(fd,2) = c * 2 + 4;
++		WFIFOSET(fd, WFIFOW(fd, 2));
++	} else {
++		clif_skill_fail(sd,MC_VENDING,USESKILL_FAIL_LEVEL,0);
++		return 0;
++	}
++
++	return 1;
++}
++
+ /*==========================================
+  * Server tells client to display a window similar to Magnifier (item) one
+  * Server populates the window with avilable elemental converter options according to player's inventory
+Index: src/map/clif.h
+===================================================================
+--- src/map/clif.h	(revision 17419)
++++ src/map/clif.h	(working copy)
+@@ -580,6 +580,7 @@
+ 
+ // atcommand
+ void clif_displaymessage(const int fd, const char* mes);
++void clif_displaymessagecolor(struct map_session_data *sd, const char* msg, unsigned long color);
+ void clif_disp_onlyself(struct map_session_data *sd, const char *mes, int len);
+ void clif_disp_message(struct block_list* src, const char* mes, int len, enum send_target target);
+ void clif_broadcast(struct block_list* bl, const char* mes, int len, int type, enum send_target target);
+@@ -783,6 +784,11 @@
+ void clif_channel_msg(struct Channel *channel, struct map_session_data *sd, char *msg, short color);
+ 
+ #define clif_menuskill_clear(sd) (sd)->menuskill_id = (sd)->menuskill_val = (sd)->menuskill_val2 = 0;
++/**
++ * Extended Vending system [Lilith]
++ **/
++int clif_vend(struct map_session_data *sd, int skill_lv);
++#define VEND_COLOR 0x00FFFF // Cyan
+ 
+ 
+ #endif /* _CLIF_H_ */
+Index: src/map/itemdb.c
+===================================================================
+--- src/map/itemdb.c	(revision 17419)
++++ src/map/itemdb.c	(working copy)
+@@ -928,8 +928,34 @@
+ 	return;
+ }
+ 
++/**
++ * Extended Vending system [Lilith]
++ **/
++static bool itemdb_read_vending(char* fields[], int columns, int current)
++{
++	struct item_data* id;
++	int nameid;
+ 
++	nameid = atoi(fields[0]);
+ 
++	if( ( id = itemdb_exists(nameid) ) == NULL )
++	{
++		ShowWarning("itemdb_read_vending: Invalid item id %d.\n", nameid);
++		return false;
++	}
++
++	if( id->type == IT_ARMOR || id->type == IT_WEAPON )
++	{
++		ShowWarning("itemdb_read_vending: item id %d cannot be equipment or weapon.\n", nameid);
++		return false;
++	}
++
++	item_vend[current].itemid = nameid;
++
++	return true;
++}
++
++
+ /*======================================
+  * Applies gender restrictions according to settings. [Skotlex]
+  *======================================*/
+@@ -1343,7 +1369,7 @@
+ 	sv_readdb(db_path, "item_stack.txt",         ',', 3, 3, -1, &itemdb_read_stack);
+ 	sv_readdb(db_path, DBPATH"item_buyingstore.txt",   ',', 1, 1, -1, &itemdb_read_buyingstore);
+ 	sv_readdb(db_path, "item_nouse.txt",		 ',', 3, 3, -1, &itemdb_read_nouse);
+-
++	sv_readdb(db_path, "item_vending.txt", ',', 1, 1, ARRAYLENGTH(item_vend), &itemdb_read_vending); // Extended Vending system [Lilith]
+ 	itemdb_uid_load();
+ }
+ 
+@@ -1411,7 +1437,7 @@
+ 	itemdb_other->clear(itemdb_other, itemdb_final_sub);
+ 
+ 	memset(itemdb_array, 0, sizeof(itemdb_array));
+-
++	memset(item_vend,0,sizeof(item_vend)); // Extended Vending system [Lilith]
+ 	// read new data
+ 	itemdb_read();
+ 	cashshop_reloaddb();
+Index: src/map/itemdb.h
+===================================================================
+--- src/map/itemdb.h	(revision 17419)
++++ src/map/itemdb.h	(working copy)
+@@ -156,7 +156,10 @@
+ 	int nameid[MAX_RANDITEM];
+ 	int qty; //Counts amount of items in the group.
+ };
+-
++struct s_item_vend{
++	int itemid;
++};
++struct s_item_vend item_vend[MAX_INVENTORY];
+ struct item_combo {
+ 	struct script_code *script;
+ 	unsigned short *nameid;/* nameid array */
+@@ -235,5 +238,10 @@
+ 
+ void do_final_itemdb(void);
+ int do_init_itemdb(void);
++/**
++ * Extended Vending system [Lilith]
++ **/
++#define ITEMID_ZENY battle_config.item_zeny
++#define ITEMID_CASH battle_config.item_cash
+ 
+ #endif /* _ITEMDB_H_ */
+Index: src/map/pc.h
+===================================================================
+--- src/map/pc.h	(revision 17419)
++++ src/map/pc.h	(working copy)
+@@ -520,7 +520,11 @@
+ 	// temporary debugging of bug #3504
+ 	const char* delunit_prevfile;
+ 	int delunit_prevline;
+-
++	/**
++	 * Extended Vending system [Lilith]
++	 **/
++	int vend_loot;
++	int vend_lvl;
+ 	struct {
+ 		int id;
+ 	} dmglog[DAMAGELOG_SIZE_PC];
+Index: src/map/skill.c
+===================================================================
+--- src/map/skill.c	(revision 17419)
++++ src/map/skill.c	(working copy)
+@@ -6262,12 +6262,46 @@
+ 
+ 	case MC_VENDING:
+ 		if(sd)
+-		{	//Prevent vending of GMs with unnecessary Level to trade/drop. [Skotlex]
+-			if ( !pc_can_give_items(sd) )
+-				clif_skill_fail(sd,skill_id,USESKILL_FAIL_LEVEL,0);
+-			else {
+-				sd->state.prevend = 1;
+-				clif_openvendingreq(sd,2+skill_lv);
++		{	
++			if ( !pc_can_give_items(sd) ) //Prevent vending of GMs with unnecessary Level to trade/drop. [Skotlex]
++				clif_skill_fail(sd,MC_VENDING,USESKILL_FAIL_LEVEL,0);
++			else { // Extended Vending system [Lilith]
++				if(battle_config.extended_vending){
++					struct item_data *item;
++					char output[1024];
++					int c = 0, i, d = 0;
++					
++					sd->vend_lvl = skill_lv;
++					if(battle_config.item_zeny)
++						d++;
++					if(battle_config.item_cash)
++						d++;
++					for( c = d, i = 0; i < ARRAYLENGTH(item_vend); i ++ ) {
++						if((item = itemdb_exists(item_vend[i].itemid)) != NULL && 
++							item->nameid != ITEMID_ZENY && item->nameid != ITEMID_CASH)
++							c++;
++					}
++					
++					if(c > 1)
++						clif_vend(sd,sd->vend_lvl);
++					else { 
++						sd->state.prevend = 1;
++						if(c) {
++							item = itemdb_exists(battle_config.item_zeny?battle_config.item_zeny:battle_config.item_cash?battle_config.item_cash:item_vend[0].itemid);
++							sd->vend_loot = item->nameid;
++							sprintf(output,msg_txt(sd,706),itemdb_jname(sd->vend_loot));
++							clif_displaymessagecolor(sd,output,VEND_COLOR);
++							clif_openvendingreq(sd,2+sd->vend_lvl);
++						} else {
++							sd->vend_loot = 0;
++							clif_openvendingreq(sd,2+sd->vend_lvl);
++						}
++					}
++				} else {
++					sd->vend_loot = 0;
++					sd->state.prevend = 1;
++					clif_openvendingreq(sd,2+skill_lv);
++				}
+ 			}
+ 		}
+ 		break;
+@@ -15852,7 +15886,40 @@
+ 
+ 	return 1;
+ }
++/**
++ * Extended Vending system [Lilith]
++ **/
++int skill_vending( struct map_session_data *sd, int nameid) {
+ 
++	struct item_data *item;
++	char output[1024];
++	
++	nullpo_ret(sd);
++
++	if( nameid <= 0) {
++		clif_skill_fail(sd,MC_VENDING,USESKILL_FAIL_LEVEL,0);
++		return 0;
++	}
++	
++	if( nameid > MAX_ITEMDB )
++		return 0;
++		
++	sd->vend_loot = nameid;
++	item = itemdb_exists(nameid);
++	
++	sprintf(output,msg_txt(sd,704),item->jname);
++	clif_displaymessagecolor(sd,output,VEND_COLOR);
++
++	if ( !pc_can_give_items(sd) )
++		clif_skill_fail(sd,MC_VENDING,USESKILL_FAIL_LEVEL,0);
++	else {
++		sd->state.prevend = 1;
++		clif_openvendingreq(sd,2+sd->vend_lvl);
++	}
++	
++	return 0;
++}
++
+ /**
+  * @see DBApply
+  */
+Index: src/map/skill.h
+===================================================================
+--- src/map/skill.h	(revision 17419)
++++ src/map/skill.h	(working copy)
+@@ -1897,6 +1897,10 @@
+ int skill_elementalanalysis(struct map_session_data *sd, int n, uint16 skill_lv, unsigned short *item_list); // Sorcerer Four Elemental Analisys.
+ int skill_changematerial(struct map_session_data *sd, int n, unsigned short *item_list);	// Genetic Change Material.
+ int skill_get_elemental_type(uint16 skill_id, uint16 skill_lv);
++/**
++ * Extended Vending system [Lilith]
++ **/
++int skill_vending( struct map_session_data *sd, int nameid);
+ 
+ void skill_combo_toogle_inf(struct block_list* bl, uint16 skill_id, int inf);
+ void skill_combo(struct block_list* src,struct block_list *dsrc, struct block_list *bl, uint16 skill_id, uint16 skill_lv, int tick);
+Index: src/map/vending.c
+===================================================================
+--- src/map/vending.c	(revision 17419)
++++ src/map/vending.c	(working copy)
+@@ -52,6 +52,7 @@
+ void vending_vendinglistreq(struct map_session_data* sd, int id)
+ {
+ 	struct map_session_data* vsd;
++	char output[1024]; // Extended Vending system [Lilith]
+ 	nullpo_retv(sd);
+ 
+ 	if( (vsd = map_id2sd(id)) == NULL )
+@@ -64,7 +65,14 @@
+ 		clif_displaymessage(sd->fd, msg_txt(sd,246));
+ 		return;
+ 	}
+-
++	
++	/**
++	 * Extended Vending system [Lilith]
++	 **/
++	if(battle_config.extended_vending && vsd->vend_loot){
++		sprintf(output,msg_txt(sd,705),vsd->status.name, itemdb_jname(vsd->vend_loot));
++		clif_displaymessagecolor(sd,output,VEND_COLOR);
++	}
+ 	sd->vended_id = vsd->vender_id;  // register vending uid
+ 
+ 	clif_vendinglist(sd, id, vsd->vending);
+@@ -124,17 +132,63 @@
+ 			vend_list[i] = j;
+ 
+ 		z += ((double)vsd->vending[j].value * (double)amount);
+-		if( z > (double)sd->status.zeny || z < 0. || z > (double)MAX_ZENY )
+-		{
+-			clif_buyvending(sd, idx, amount, 1); // you don't have enough zeny
+-			return;
++		/**
++		 * Extended Vending system [Lilith]
++		 **/
++		if(battle_config.extended_vending){
++			if(vsd->vend_loot == ITEMID_ZENY || !vsd->vend_loot) {
++				if( z > (double)sd->status.zeny || z < 0. || z > (double)MAX_ZENY )
++				{
++					//clif_buyvending(sd, idx, amount, 1); // you don't have enough zeny
++					return;
++				}
++				if( z + (double)vsd->status.zeny > (double)MAX_ZENY && !battle_config.vending_over_max )
++				{
++					clif_buyvending(sd, idx, vsd->vending[j].amount, 4); // too much zeny = overflow
++					return;
++		
++				}
++			} else if(vsd->vend_loot == ITEMID_CASH){
++				if(z > sd->cashPoints || z < 0. || z > (double)MAX_ZENY ) {
++					clif_displaymessagecolor(sd,msg_txt(sd,700),VEND_COLOR);
++					return;
++				}
++			} else {
++				int k, loot_count = 0, vsd_w = 0;
++				for(k = 0; k < MAX_INVENTORY; k++)
++					if(sd->status.inventory[k].nameid == vsd->vend_loot)
++						loot_count += sd->status.inventory[k].amount;
++						
++				if( z > loot_count || z < 0)
++				{
++					clif_displaymessagecolor(sd,msg_txt(sd,701),VEND_COLOR);
++					return;
++				}
++				if(pc_inventoryblank(vsd) <= 0)
++				{
++					clif_displaymessagecolor(sd,msg_txt(sd,702),VEND_COLOR);
++					return;
++				}
++				vsd_w += itemdb_weight(vsd->vend_loot) * (int)z;
++				if(vsd_w + vsd->weight > vsd->max_weight)
++				{
++					clif_displaymessagecolor(sd,msg_txt(sd,703),VEND_COLOR);
++					return;
++				}
++ 
++			}
++		} else {
++			if( z > (double)sd->status.zeny || z < 0. || z > (double)MAX_ZENY )
++			{
++				clif_buyvending(sd, idx, amount, 1); // you don't have enough zeny
++				return;
++			}
++			if( z + (double)vsd->status.zeny > (double)MAX_ZENY && !battle_config.vending_over_max )
++			{
++				clif_buyvending(sd, idx, vsd->vending[j].amount, 4); // too much zeny = overflow
++				return;
++			}
+ 		}
+-		if( z + (double)vsd->status.zeny > (double)MAX_ZENY && !battle_config.vending_over_max )
+-		{
+-			clif_buyvending(sd, idx, vsd->vending[j].amount, 4); // too much zeny = overflow
+-			return;
+-
+-		}
+ 		w += itemdb_weight(vsd->status.cart[idx].nameid) * amount;
+ 		if( w + sd->weight > sd->max_weight ) {
+ 			clif_buyvending(sd, idx, amount, 2); // you can not buy, because overweight
+@@ -168,17 +222,50 @@
+ 			return; //too many items
+ 		}
+ 	}
+-
++	/**
++	 * Extended Vending system [Lilith]
++	 **/
++	if(battle_config.extended_vending){
++		if(vsd->vend_loot == ITEMID_ZENY || !vsd->vend_loot) {
++		
++			//Logs (V)ending Zeny [Lupus]
++			log_zeny(vsd, LOG_TYPE_VENDING, sd, (int)z);
++		
++			pc_payzeny(sd, (int)z, LOG_TYPE_VENDING, vsd);
++			if( battle_config.vending_tax )
++				z -= z * (battle_config.vending_tax/10000.);
++			pc_getzeny(vsd, (int)z, LOG_TYPE_VENDING, sd);
++			
++		} else if(vsd->vend_loot == ITEMID_CASH) {
++			pc_paycash(sd,(int)z,0, LOG_TYPE_VENDING);
++			pc_getcash(vsd,(int)z,0, LOG_TYPE_VENDING);
++		} else {
++			for( i = 0; i < MAX_INVENTORY; i++)
++				if(sd->status.inventory[i].nameid == vsd->vend_loot)
++				{
++					struct item *item;
++					item = &sd->status.inventory[i];
++					pc_additem(vsd,item,(int)z, LOG_TYPE_VENDING);
++				}
++			pc_delitem(sd,pc_search_inventory(sd, vsd->vend_loot),(int)z,0,6, LOG_TYPE_VENDING);
++			
++		}
++	}else{
+ 	pc_payzeny(sd, (int)z, LOG_TYPE_VENDING, vsd);
+ 	if( battle_config.vending_tax )
+ 		z -= z * (battle_config.vending_tax/10000.);
+ 	pc_getzeny(vsd, (int)z, LOG_TYPE_VENDING, sd);
+-
++	}
+ 	for( i = 0; i < count; i++ ) {
+ 		short amount = *(uint16*)(data + 4*i + 0);
+ 		short idx    = *(uint16*)(data + 4*i + 2);
++		const char *item_name;
++		double rev = 0.;
+ 		idx -= 2;
+-
++		if(battle_config.ex_vending_info){ // Extended Vending system [Lilith]
++			item_name = itemdb_jname(vsd->status.cart[idx].nameid);
++			rev = ((double)vsd->vending[vend_list[i]].value * (double)amount);
++		}
+ 		// vending item
+ 		pc_additem(sd, &vsd->status.cart[idx], amount, LOG_TYPE_VENDING);
+ 		vsd->vending[vend_list[i]].amount -= amount;
+@@ -188,11 +275,19 @@
+ 		//print buyer's name
+ 		if( battle_config.buyer_name ) {
+ 			char temp[256];
+-			sprintf(temp, msg_txt(sd,265), sd->status.name);
++			if(battle_config.ex_vending_info) // Extended Vending system [Lilith]
++				sprintf(temp, msg_txt(sd,707), sd->status.name, item_name, amount, (int)(rev -= rev * (battle_config.vending_tax/10000.)), vsd->vend_loot?itemdb_jname(vsd->vend_loot):"Zeny");
++			else
++				sprintf(temp, msg_txt(sd,265), sd->status.name);
+ 			clif_disp_onlyself(vsd,temp,strlen(temp));
+ 		}
+ 	}
+ 
++	if(battle_config.ex_vending_info){ // Extended Vending system [Lilith]
++		char temp[256];
++		sprintf(temp, msg_txt(sd,708), sd->status.name, (int)z, vsd->vend_loot?itemdb_jname(vsd->vend_loot):"Zeny");
++		clif_disp_onlyself(vsd,temp,strlen(temp));
++	}
+ 	// compact the vending list
+ 	for( i = 0, cursor = 0; i < vsd->vend_num; i++ ) {
+ 		if( vsd->vending[i].amount == 0 )
